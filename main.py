@@ -1,15 +1,18 @@
 import json
 from rich import print
 
-from typing import Annotated
+from typing import Annotated, Dict, Any, Iterator, Tuple
 from typing_extensions import TypedDict
 
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import ToolMessage
 
-from langgraph.graph import StateGraph, START, END
-from langgraph.graph.message import add_messages
+from langchain_core.runnables import RunnableConfig
 from langchain_tavily import TavilySearch
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import MemorySaver
 
 
 class State(TypedDict):
@@ -78,7 +81,9 @@ def main():
     # Add an entry point to tell the graph where to start its work each time it is run
     graph_builder.add_edge(START, "chatbot")
 
-    graph = graph_builder.compile()
+    memory = MemorySaver()
+    graph = graph_builder.compile(checkpointer=memory)
+    config = {"configurable": {"thread_id": "1"}}
 
     while True:
         try:
@@ -86,12 +91,12 @@ def main():
             if user_input.lower() in ["quit", "exit", "q"]:
                 print("Goodbye!")
                 break
-            stream_graph_updates(graph, user_input)
+            stream_graph_updates(graph, config, user_input)
         except:
             # fallback if input() is not available
             user_input = "What do you know about LangGraph?"
             print("User: " + user_input)
-            stream_graph_updates(graph, user_input)
+            stream_graph_updates(graph, config, user_input)
             break
 
 
@@ -99,15 +104,22 @@ def chatbot(state: State) -> dict:
     return {"messages": [llm_with_tools.invoke(state["messages"])]}
 
 
-def stream_graph_updates(graph, user_input: str) -> None:
+def stream_graph_updates(
+    graph: CompiledStateGraph, config: RunnableConfig | None, user_input: str
+) -> None:
     input_message = {"role": "user", "content": user_input}
-    for (
-        step,
-        metadata,
-    ) in graph.stream({"messages": [input_message]}, stream_mode="messages"):
-        if text := step.text():
-            print(text, end="")
+    
+    # Explicitly type the stream results
+    stream_results: Iterator[Dict[Any, Dict[str, Any]]] = graph.stream(
+        {"messages": [input_message]}, config=config, stream_mode="messages"
+    )
+    
+    for step, metadata in stream_results:
+        if metadata["langgraph_node"] == "chatbot" and hasattr(step, "text"):
+            if text := step.text():
+                print(text, end="")
     print()
+
 
 def route_tools(
     state: State,
@@ -125,6 +137,7 @@ def route_tools(
     if hasattr(ai_message, "tool_calls") and len(ai_message.tool_calls) > 0:
         return "tools"
     return END
+
 
 if __name__ == "__main__":
     main()
