@@ -1,9 +1,15 @@
+# dev
 mypy
 pytest
 pytest-env
 black
+# util
 rich
+ipython
+# langchain
+# transformers
 langchain
 langgraph
+langsmith
 langchain[ollama]
-transformers
+langchain-tavily
