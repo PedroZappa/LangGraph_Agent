@@ -1,11 +1,10 @@
-import json
 from rich import print
 
 from typing import Annotated, Dict, Any, Iterator, Tuple
 from typing_extensions import TypedDict
 
 from langchain.chat_models import init_chat_model
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
@@ -51,6 +50,13 @@ tools: list = [tool, human_assistance]
 llm = init_chat_model("qwen3", model_provider="ollama")
 llm_with_tools = llm.bind_tools(tools)
 
+human_response = (
+    "We, the experts are here to help! We'd recommend you check out LangGraph to build your agent."
+    " It's much more reliable and extensible than simple autonomous agents."
+)
+
+human_command = Command(resume={"data": human_response})
+
 
 def main():
     # The first argument is the unique node name
@@ -58,22 +64,15 @@ def main():
     # the node is used.
     graph_builder.add_node("chatbot", chatbot)
     # Create tool node that wraps available tools in a ToolNode container
-    tool_node = ToolNode(tools=[tool])
+    tool_node = ToolNode(tools=tools)
     graph_builder.add_node("tools", tool_node)
 
-    # The `tools_condition` function returns "tools" if the chatbot asks to 
-    # use a tool, and "END" if it is fine directly responding. This conditional 
+    # The `tools_condition` function returns "tools" if the chatbot asks to
+    # use a tool, and "END" if it is fine directly responding. This conditional
     # routing defines the main agent loop.
     graph_builder.add_conditional_edges(
         "chatbot",
-        route_tools,
-        # The following dictionary lets you tell the graph to interpret the 
-        # condition's outputs as a specific node
-        # It defaults to the identity function, but if you
-        # want to use a node named something else apart from "tools",
-        # You can update the value of the dictionary to something else
-        # e.g., "tools": "my_tools"
-        {"tools": "tools", END: END},
+        tools_condition,
     )
     # Creates a direct edge from "tools" back to "chatbot"
     # After any tool is executed, control always returns to the chatbot node
@@ -86,7 +85,9 @@ def main():
     memory = MemorySaver()
     # Compile the graph
     graph = graph_builder.compile(checkpointer=memory)
-    config = {"configurable": {"thread_id": "1"}}
+
+    # Create a configuration
+    config: RunnableConfig = {"configurable": {"thread_id": "1"}}
 
     while True:
         try:
@@ -94,12 +95,12 @@ def main():
             if user_input.lower() in ["quit", "exit", "q"]:
                 print("Goodbye!")
                 break
-            stream_graph_updates(graph, config, user_input)
+            stream_graph_updates(graph, human_command, config, user_input)
         except:
             # fallback if input() is not available
             user_input = "What do you know about LangGraph?"
             print("User: " + user_input)
-            stream_graph_updates(graph, config, user_input)
+            stream_graph_updates(graph, human_command, config, user_input)
             break
 
     return 0
@@ -107,43 +108,71 @@ def main():
 
 def chatbot(state: State) -> dict:
     """
-    Process user messages through an LLM with tool capabilities. 
+    Process user messages through an LLM with tool capabilities.
 
     :param state: The state of the graph
     :type state: State
     :return: The response from the LLM
     :rtype: dict
     """
-    return {"messages": [llm_with_tools.invoke(state["messages"])]}
+    message = llm_with_tools.invoke(state["messages"])
+    assert len(message.tool_calls) <= 1
+    return {"messages": [message]}
 
 
 def stream_graph_updates(
-    graph: CompiledStateGraph, config: RunnableConfig | None, user_input: str
+    graph: CompiledStateGraph,
+    human_command: Command,
+    config: RunnableConfig | None,
+    user_input: str,
 ) -> None:
     """
     Stream and print updates from the LangGraph compiled graph based on user input.
-
-    :param graph: The compiled LangGraph graph to execute
-    :type graph: CompiledStateGraph
-    :param config: Optional configuration for the graph execution
-    :type config: RunnableConfig | None
-    :param user_input: The user's input message to process
-    :type user_input: str
-    :return: This function prints output directly and does not return a value
-    :rtype: None
     """
-    input_message = {"role": "user", "content": user_input}
+    input_message = [{"role": "user", "content": user_input}]
 
-    # Explicitly type the stream results
-    stream_results: Iterator[Dict[Any, Dict[str, Any]]] = graph.stream(
-        {"messages": [input_message]}, config=config, stream_mode="messages"
-    )
+    inputs_to_stream = [
+        {"messages": input_message},  # User input
+        human_command,  # Human command
+    ]
 
-    for step, metadata in stream_results:
-        if metadata["langgraph_node"] == "chatbot" and hasattr(step, "text"):
-            if text := step.text():
-                print(text, end="")
-    print()
+    # Stream both inputs using the same pattern
+    for input_data in inputs_to_stream:
+        assistant_started = False  # Track if we've started printing assistant output
+        stream_results = graph.stream(
+            input_data, config=config, stream_mode="messages"
+        )
+
+        for step, metadata in stream_results:
+            node_name = metadata["langgraph_node"]
+            
+            # Handle chatbot responses
+            if node_name == "chatbot":
+                if isinstance(step, AIMessage):
+                    # Print tool calls if any
+                    if hasattr(step, "tool_calls") and step.tool_calls:
+                        for tool_call in step.tool_calls:
+                            print(f"🔍 Calling tool: {tool_call['name']}")
+                            print(f"   Arguments: {tool_call['args']}")
+                    
+                    # Print assistant text response
+                    if hasattr(step, "text") and step.text():
+                        if not assistant_started:
+                            print("\n🤖 Assistant: ", end="\n\n")
+                            assistant_started = True
+                        print(step.text(), end="")
+            
+            # Handle tool responses
+            elif node_name == "tools":
+                print()
+                if isinstance(step, ToolMessage):
+                    tool_call_id = getattr(step, "tool_call_id", "Unknown")
+                    print(f"🔧 Tool Result (ID: {tool_call_id}): {step.content}")
+                elif hasattr(step, "content"):
+                    print(f"🔧 Tool Output: {step.content}")
+        
+        print()
+        print("-" * 50)  # Separator between iterations
 
 
 def route_tools(
