@@ -1,6 +1,6 @@
 from rich import print
 
-from typing import Annotated, Dict, Any, Iterator, Tuple
+from typing import Annotated, Dict, Any, cast
 from typing_extensions import TypedDict
 
 from langchain.chat_models import init_chat_model
@@ -55,7 +55,7 @@ human_response = (
     " It's much more reliable and extensible than simple autonomous agents."
 )
 
-human_command = Command(resume={"data": human_response})
+human_command: Command = Command(resume={"data": human_response})
 
 
 def main():
@@ -116,6 +116,7 @@ def chatbot(state: State) -> dict:
     :rtype: dict
     """
     message = llm_with_tools.invoke(state["messages"])
+    assert isinstance(message, AIMessage)
     assert len(message.tool_calls) <= 1
     return {"messages": [message]}
 
@@ -144,6 +145,8 @@ def stream_graph_updates(
         )
 
         for step, metadata in stream_results:
+            # Type hint the metadata to help mypy understand it's a dictionary
+            metadata = cast(Dict[str, Any], metadata)
             node_name = metadata["langgraph_node"]
             
             # Handle chatbot responses
